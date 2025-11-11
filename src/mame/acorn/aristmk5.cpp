@@ -824,11 +824,11 @@
 namespace {
 
 #define MASTER_CLOCK        72_MHz_XTAL      /* confirmed */
-
+/*
 QCOM Protocol Emulator (Self-contained, minimal-integration)
 Usage (Option A style): drop this into src/mame/acorn/aristmk5.cpp as-is.
 The class is self-contained and does not depend on MAME device_t types.
-Instantiate qcom_emulator in the aristmk5 driver and wire serial RX/TX:
+Instantiate qcom_emulator in the aristmk5 driver and wire serial RX/TX:*/
  
  qcom_emulator *m_qcom = new qcom_emulator();
  // when host transmits a byte to QCOM:
