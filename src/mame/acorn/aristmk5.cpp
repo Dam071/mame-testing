@@ -2579,6 +2579,183 @@ void aristmk5_state::aristmk5(machine_config &config)
 	rs232.set_option_device_input_defaults("terminal"  , DEVICE_INPUT_DEFAULTS_NAME(aristmk5_rs232_defaults));
 }
 
+// QCOM Gaming Protocol Emulation Module
+// Compatible with QCOM Protocol v1.6.7
+// Designed for MAME Aristocrat MK5 Emulation
+
+#pragma once
+
+#include "emu.h"
+#include "machine/timer.h"
+#include <vector>
+#include <queue>
+#include <chrono>
+
+class qcom_protocol_device : public device_t {
+public:
+    // Frame Structure with Enhanced CRC Support
+    struct QcomFrame {
+        uint8_t address;
+        uint8_t command;
+        std::vector<uint8_t> payload;
+        uint16_t crc;
+
+        // CRC Validation Method
+        bool validate_crc() const {
+            // Reconstruct frame data for CRC calculation
+            std::vector<uint8_t> frame_data;
+            frame_data.push_back(address);
+            frame_data.push_back(command);
+            frame_data.insert(
+                frame_data.end(), 
+                payload.begin(), 
+                payload.end()
+            );
+
+            return qcom_crc::validate_frame_crc(frame_data, crc);
+        }
+
+        // CRC Generation Method
+        void generate_crc() {
+            std::vector<uint8_t> frame_data;
+            frame_data.push_back(address);
+            frame_data.push_back(command);
+            frame_data.insert(
+                frame_data.end(), 
+                payload.begin(), 
+                payload.end()
+            );
+
+            crc = qcom_crc::calculate(frame_data);
+        }
+    };
+
+    // Enhanced Frame Transmission Method
+    bool send_frame(QcomFrame& frame) {
+        // Generate CRC before transmission
+        frame.generate_crc();
+
+        // Transmission Logging for Debug
+        if (m_config.debug_mode) {
+            log_frame_transmission(frame);
+        }
+
+        // Add frame to transmission queue
+        m_tx_queue.push(frame);
+        return true;
+    }
+
+    // Enhanced Frame Reception Method
+    std::optional<QcomFrame> receive_frame() {
+        if (m_rx_queue.empty()) {
+            return std::nullopt;
+        }
+
+        QcomFrame received_frame = m_rx_queue.front();
+        m_rx_queue.pop();
+
+        // CRC Validation
+        if (!received_frame.validate_crc()) {
+            log_crc_error(received_frame);
+            return std::nullopt;
+        }
+
+        return received_frame;
+    }
+
+private:
+    // Detailed Logging Methods
+    void log_frame_transmission(const QcomFrame& frame) {
+        // Detailed frame transmission logging
+        logerror("QCOM TX: Addr=%02X, Cmd=%02X, Payload=%zu bytes, CRC=%04X\n", 
+            frame.address, 
+            frame.command, 
+            frame.payload.size(), 
+            frame.crc
+        );
+    }
+
+    void log_crc_error(const QcomFrame& frame) {
+        logerror("QCOM CRC ERROR: Invalid Frame\n"
+                 "  Address: %02X\n"
+                 "  Command: %02X\n"
+                 "  Payload Size: %zu\n"
+                 "  Received CRC: %04X\n",
+            frame.address,
+            frame.command,
+            frame.payload.size(),
+            frame.crc
+        );
+    }
+
+    // Enhanced Error Handling
+    enum class ProtocolError {
+        CRC_MISMATCH,
+        FRAME_OVERFLOW,
+        TRANSMISSION_TIMEOUT
+    };
+
+    // Error Tracking and Reporting
+    struct ProtocolErrorStats {
+        uint32_t crc_errors = 0;
+        uint32_t transmission_errors = 0;
+        uint32_t protocol_violations = 0;
+    } m_error_stats;
+
+    // Method to report and track protocol errors
+    void report_protocol_error(ProtocolError error) {
+        switch (error) {
+            case ProtocolError::CRC_MISMATCH:
+                m_error_stats.crc_errors++;
+                break;
+            case ProtocolError::TRANSMISSION_TIMEOUT:
+                m_error_stats.transmission_errors++;
+                break;
+            case ProtocolError::FRAME_OVERFLOW:
+                m_error_stats.protocol_violations++;
+                break;
+        }
+
+        // Optional: Trigger error recovery mechanism
+        if (m_config.debug_mode) {
+            log_error_statistics();
+        }
+    }
+
+    // Error Statistics Logging
+    void log_error_statistics() {
+        logerror("QCOM Protocol Error Statistics:\n"
+                 "  CRC Errors: %u\n"
+                 "  Transmission Errors: %u\n"
+                 "  Protocol Violations: %u\n",
+            m_error_stats.crc_errors,
+            m_error_stats.transmission_errors,
+            m_error_stats.protocol_violations
+        );
+    }
+
+public:
+    // Enhanced Configuration Options
+    struct QcomConfig {
+        uint16_t protocol_version = 0x167;
+        bool debug_mode = false;
+        uint32_t poll_interval_ms = 50;
+        
+        // New CRC Configuration
+        qcom_crc::CrcConfig crc_config = qcom_crc::get_qcom_standard_config();
+        
+        // Error Handling Thresholds
+        uint8_t max_crc_errors = 5;
+        uint8_t max_transmission_errors = 3;
+    };
+
+    // Diagnostic Method for Protocol Health
+    bool is_protocol_healthy() const {
+        return (m_error_stats.crc_errors < m_config.max_crc_errors &&
+                m_error_stats.transmission_errors < m_config.max_transmission_errors);
+    }
+};
+
 
 void aristmk5_state::aristmk5_touch(machine_config &config)
 {
