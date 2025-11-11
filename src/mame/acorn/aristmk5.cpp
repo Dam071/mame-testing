@@ -670,6 +670,14 @@
 #include "machine/nvram.h"
 #include "machine/ins8250.h"
 #include "machine/ticket.h"
+#include "cpu/m68000/m68000.h" 
+#include <cstdint> 
+#include <vector> 
+#include <deque> 
+#include <functional> 
+#include <chrono> 
+#include <algorithm> 
+#include <cstring>
 
 // Non-US button layouts    Bet buttons       Lines Gamble     Notes
 #include "aristmk5.lh"   // 1, 2, 3, 5, 10    20    suits      Take Win/Start Feature
@@ -816,6 +824,30 @@
 namespace {
 
 #define MASTER_CLOCK        72_MHz_XTAL      /* confirmed */
+
+/*-------------------------------------------------------------------------
+
+QCOM Protocol Emulator (Self-contained, minimal-integration)
+Usage (Option A style): drop this into src/mame/acorn/aristmk5.cpp as-is.
+The class is self-contained and does not depend on MAME device_t types.
+Instantiate qcom_emulator in the aristmk5 driver and wire serial RX/TX:*/
+ 
+ qcom_emulator *m_qcom = new qcom_emulator();
+ // when host transmits a byte to QCOM:
+ m_qcom->input_byte(host_byte, machine_time_seconds());
+
+ // periodically (e.g. every emu tick) call:
+ m_qcom->step(machine_time_seconds());
+
+ // read bytes the QCOM wants to send to host:
+ if (m_qcom->has_tx_byte()) host_receive(m_qcom->read_tx_byte());
+/* The emulator implements a flexible frame parser, LRC/XOR checksum,
+ACK/NAK handling, configurable timing (per-character and inter-frame),
+and allows a user-supplied command handler to produce replies.
+Defaults were selected to be broadly compatible with stream/frame-based
+serial protocols (STX/ETX framing, XOR LRC). Timing values are configurable
+to match target hardware. 
++-------------------------------------------------------------------------*/
 
 class aristmk5_state : public driver_device
 {
@@ -1413,6 +1445,254 @@ INPUT_CHANGED_MEMBER(aristmk5_state::coin_start)
 	if (newval && !m_coin_start_cycles)
 		m_coin_start_cycles = m_maincpu->total_cycles();
 }
+
+class qcom_emulator +{ +public:
+// Simple time type: seconds as double (use machine's wallclock/emu time)
+using time_t = double;
+using bytes = std::vector<uint8_t>;
+using handler_t = std::function<bytes(const bytes& request)>;
+qcom_emulator(uint8_t addr = 0x00)
+   : m_address(addr)
+{
+
+   // default protocol characters (configurable) 
+   m_stx = 0x02;   // start
+   m_etx = 0x03;   // end
+   m_ack = 0x06;
+   m_nak = 0x15;
+
+   // timing defaults (seconds)
+   m_char_time = 0.001;        // 1 ms per char (adjust to baud)
+   m_inter_frame = 0.010;      // 10 ms between frames
+   m_response_delay = 0.002;   // 2 ms processing delay
+   m_last_input_time = 0.0;
+   m_frame_in_progress = false;
+   m_frame_start_time = 0.0;
+   m_intersymbol_timeout = 3.0 * m_char_time;
+
+   // default handler: echo with ACK
+   m_handler = [this](const bytes &req) {
+       bytes resp;
+       // default: ACK + request payload echoed
+       resp.push_back(m_ack);
+       resp.insert(resp.end(), req.begin(), req.end());
+       return resp;
+   };
+}
+// Configuration
+void set_address(uint8_t addr) { m_address = addr; }
+void set_chars(uint8_t stx, uint8_t etx, uint8_t ack = 0x06, uint8_t nak = 0x15)
+{
+   m_stx = stx; m_etx = etx; m_ack = ack; m_nak = nak;
+}
+void set_timing(time_t char_time_sec, time_t inter_frame_sec, time_t response_delay_sec)
+{
+   m_char_time = char_time_sec;
+   m_inter_frame = inter_frame_sec;
+   m_response_delay = response_delay_sec;
+   m_intersymbol_timeout = std::max(3.0 * m_char_time, 0.0);
+}
+void set_command_handler(handler_t h) { m_handler = std::move(h); }
+// Input a byte "from the host" into the QCOM emulator at time t (seconds)
+void input_byte(uint8_t b, time_t t)
+{
+   // detect inter-frame gap to start a new frame
+    if (!m_frame_in_progress || (t - m_last_input_time) > m_intersymbol_timeout) {
+       // start fresh
+       m_frame_buffer.clear();
+       m_frame_in_progress = true;
+       m_frame_start_time = t;
+    }
+   m_frame_buffer.push_back(b);
+   m_last_input_time = t;
+    m_last_byte_received_time = t;
+   // if ETX-based framing, detect frame complete immediately
+   if (b == m_etx) {
+       queue_frame_for_processing(t);
+   }
+
+   // length-based frames or other protocols can be implemented by providing
+   // a custom handler that interprets m_frame_buffer contents.
+}
+   // Should be called periodically (e.g. each emulation tick) to process timeouts and schedule TX
+void step(time_t t)
+{
+   // if a frame has been idle past intersymbol timeout and not previously queued, queue it
+   if (m_frame_in_progress && !m_queued && (t - m_last_byte_received_time) > m_intersymbol_timeout) {
+       queue_frame_for_processing(t);
+   }
+   // handle scheduled response (issue bytes into tx_queue with per-char timing)
+   if (!m_pending_response.empty()) {
+       // if no current transmit in progress, begin after response_delay
+       if (!m_tx_in_progress && (t - m_response_scheduled_time) >= m_response_delay) {
+           // schedule first char send
+           m_next_tx_time = t;
+           m_tx_in_progress = true;
+       }
+
+       // emit characters as time passes
+       while (m_tx_in_progress && !m_pending_response.empty() && t >= m_next_tx_time) {
+           uint8_t b = m_pending_response.front();
+           m_pending_response.pop_front();
+           m_tx_queue.push_back(b);
+           m_next_tx_time += m_char_time;
+       }
+       // if all response bytes emitted, finish transmit
+       if (m_pending_response.empty()) {
+           m_tx_in_progress = false;
+           m_queued = false;
+           m_frame_in_progress = false;
+       }
+   }
+}
+// Host polls: does emulator have byte(s) ready to be read?
+bool has_tx_byte() const { return !m_tx_queue.empty(); }
+uint8_t read_tx_byte()
+{
+   if (m_tx_queue.empty()) return 0;
+   uint8_t b = m_tx_queue.front();
+   m_tx_queue.pop_front();
+   return b;
+}
+// Utilities: change checksum algorithm. Default is XOR LRC over payload between STX and ETX.
+static uint8_t xor_lrc(const bytes &v, size_t begin = 0, size_t end = std::string::npos)
+{
+   if (end == std::string::npos) end = v.size();
+   uint8_t acc = 0x00;
+   for (size_t i = begin; i < end && i < v.size(); ++i) acc ^= v[i];
+   return acc;
+}
++private:
+
+// internal helpers
+void queue_frame_for_processing(time_t t)
+{
+   m_frame_in_progress = false;
+   m_queued = true;
+   m_frame_complete_time = t;
+
+   // parse frame and prepare response using handler in a deferred manner
+   bytes payload = extract_payload(m_frame_buffer);
+
+   // Verify (best-effort) checksum if present: last byte is checksum if length>2
+   bool checksum_ok = true;
+
+   if (payload.size() >= 2) {
+
+       // assume last byte is checksum, verify XOR over payload[0..n-2]
+       uint8_t expected = xor_lrc(payload, 0, payload.size() - 1);
+       uint8_t got = payload.back();
+       checksum_ok = (expected == got);
+       if (checksum_ok) {
+           // strip checksum for handler
+           payload.pop_back();
+       }
+   }
+
+   // Create reply bytes by calling handler
+   bytes reply_payload;
+   if (checksum_ok) {
+       try {
+           reply_payload = m_handler(payload);
+       } catch (...) {
+
+           // on handler error, send NAK
+           reply_payload = bytes(1, m_nak);
+       }
+   } else {
+
+       // checksum failed -> NAK
+       reply_payload = bytes(1, m_nak);
+   }
+
+   // Wrap reply into framed bytes: STX ... payload ... CHK ETX (if ETX framing is used)
+   bytes framed;
+   framed.push_back(m_stx);
+
+   // if reply already contains ACK/NAK single-byte control, send raw framed as [ACK]
+   if (reply_payload.size() == 1 && (reply_payload[0] == m_ack || reply_payload[0] == m_nak)) {
+
+       // raw single-byte control (no checksum/ETX)
+       framed.clear();
+       framed.push_back(reply_payload[0]);
+   } else {
+
+       // append payload, append checksum, ETX
+       framed.insert(framed.end(), reply_payload.begin(), reply_payload.end());
+       uint8_t chk = xor_lrc(framed, 1, framed.size()); // XOR over bytes after STX
+       framed.push_back(chk);
+       framed.push_back(m_etx);
+   }
+   
+   // schedule pending response
+   m_pending_response.clear();
+   for (auto b : framed) m_pending_response.push_back(b);
+   m_response_scheduled_time = m_frame_complete_time;
+   m_tx_in_progress = false;
+}
+
+// Extract the "payload" from a raw frame buffer.
+// Default strategy: if framed with STX/ETX, return bytes between STX and ETX (inclusive checksum if present).
+bytes extract_payload(const bytes &raw)
+{
+
+   // find STX
+   size_t s = 0;
+   while (s < raw.size() && raw[s] != m_stx) ++s;
+   if (s >= raw.size()) {
+       // not STX framed, return raw entire buffer
+       return raw;
+   }
+   
+   // find ETX after STX
+   size_t e = s + 1;
+   while (e < raw.size() && raw[e] != m_etx) ++e;
+   if (e < raw.size() && raw[e] == m_etx) {
+       // return bytes between STX( excluded ) and ETX (excluded) but include checksum if present
+       if (e > s + 1) {
+           // payload including checksum candidate at end
+           bytes res;
+           res.insert(res.end(), raw.begin() + s + 1, raw.begin() + e);
+           return res;
+       } else {
+           return bytes();
+       }
+   } else {
+
+       // ETX not found: may be a length-based or simple raw frame; return content after STX
+       bytes res;
+       if (s + 1 < raw.size()) res.insert(res.end(), raw.begin() + s + 1, raw.end());
+       return res;
+   }
+}
++private:
+
+// configuration
+uint8_t m_address;
+uint8_t m_stx, m_etx, m_ack, m_nak;
+time_t m_char_time;
+time_t m_inter_frame;
+time_t m_response_delay;
+time_t m_intersymbol_timeout;
+
+// input frame assembly
+bytes m_frame_buffer;
+bool m_frame_in_progress;
+bool m_queued = false;
+time_t m_frame_start_time;
+time_t m_last_input_time;
+time_t m_last_byte_received_time;
+time_t m_frame_complete_time;
+
+// response scheduling and TX
+std::deque<uint8_t> m_pending_response;
+std::deque<uint8_t> m_tx_queue;
+bool m_tx_in_progress = false;
+time_t m_response_scheduled_time = 0.0;
+time_t m_next_tx_time = 0.0;
+
+// user command handler
+handler_t m_handler; +};
 
 static INPUT_PORTS_START( aristmk5_usa )
 	// This simulates the ROM swap
