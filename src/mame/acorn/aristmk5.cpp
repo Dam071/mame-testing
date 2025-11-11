@@ -832,7 +832,8 @@ Usage (Option A style): drop this into src/mame/acorn/aristmk5.cpp as-is.
 The class is self-contained and does not depend on MAME device_t types.
 Instantiate qcom_emulator in the aristmk5 driver and wire serial RX/TX:*/
  
- qcom_emulator *m_qcom = new qcom_emulator();
+ //qcom_emulator 
+ *m_qcom = new qcom_emulator();
  // when host transmits a byte to QCOM:
  m_qcom->input_byte(host_byte, machine_time_seconds());
 
