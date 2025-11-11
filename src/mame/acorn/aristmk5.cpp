@@ -830,7 +830,7 @@ Usage (Option A style): drop this into src/mame/acorn/aristmk5.cpp as-is.
 The class is self-contained and does not depend on MAME device_t types.
 Instantiate qcom_emulator in the aristmk5 driver and wire serial RX/TX:*/
  
- qcom_emulator *m_qcom = new qcom_emulator();
+ *m_qcom = new qcom_emulator();
  // when host transmits a byte to QCOM:
  m_qcom->input_byte(host_byte, machine_time_seconds());
 
@@ -839,14 +839,17 @@ Instantiate qcom_emulator in the aristmk5 driver and wire serial RX/TX:*/
 
  // read bytes the QCOM wants to send to host:
  if (m_qcom->has_tx_byte()) host_receive(m_qcom->read_tx_byte());
-The emulator implements a flexible frame parser, LRC/XOR checksum,
+/* The emulator implements a flexible frame parser, LRC/XOR checksum,
 ACK/NAK handling, configurable timing (per-character and inter-frame),
 and allows a user-supplied command handler to produce replies.
 Defaults were selected to be broadly compatible with stream/frame-based
 serial protocols (STX/ETX framing, XOR LRC). Timing values are configurable
-to match target hardware. +-------------------------------------------------------------------------*/
+to match target hardware. 
+-------------------------------------------------------------------------*/
 
-+class qcom_emulator +{ +public:
+class qcom_emulator 
+{ 
+public:
 // Simple time type: seconds as double (use machine's wallclock/emu time)
 using time_t = double;
 using bytes = std::vector<uint8_t>;
