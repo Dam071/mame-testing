@@ -817,25 +817,6 @@ namespace {
 
 #define MASTER_CLOCK        72_MHz_XTAL      /* confirmed */
 
-void aristmk5_state::process_qcom_protocol() {
-    // Create diagnostic frame
-    qcom_protocol_device::QcomFrame diagnostic_frame = {
-        0x01,  // Device Address
-        0x20,  // Diagnostic Command
-        {0x00, 0x01, 0x02},  // Diagnostic Payload
-        0x0000  // CRC (will be auto-generated)
-    };
-
-    // Send and validate frame
-    if (m_qcom_device->send_frame(diagnostic_frame)) {
-        // Check protocol health
-        if (!m_qcom_device->is_protocol_healthy()) {
-            // Trigger protocol reset or error handling
-            reset_qcom_protocol();
-        }
-    }
-}
-
 class aristmk5_state : public driver_device
 {
 public:
@@ -860,6 +841,26 @@ public:
 		, m_dsw2(*this, "DSW2")
 		, m_lamps(*this, "lamp%u", 0U)
 	 { }
+
+void aristmk5_state::process_qcom_protocol() {
+    // Create diagnostic frame
+    qcom_protocol_device::QcomFrame diagnostic_frame = {
+        0x01,  // Device Address
+        0x20,  // Diagnostic Command
+        {0x00, 0x01, 0x02},  // Diagnostic Payload
+        0x0000  // CRC (will be auto-generated)
+    };
+
+    // Send and validate frame
+    if (m_qcom_device->send_frame(diagnostic_frame)) {
+        // Check protocol health
+        if (!m_qcom_device->is_protocol_healthy()) {
+            // Trigger protocol reset or error handling
+            reset_qcom_protocol();
+        }
+    }
+}
+
 
 	static constexpr feature_type imperfect_features() { return feature::GRAPHICS | feature::SOUND | feature::TIMING; }
 
