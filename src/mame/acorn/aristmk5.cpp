@@ -2637,7 +2637,7 @@ public:
         frame.generate_crc();
 
         // Transmission Logging for Debug
-        if (m_config.debug_mode) {
+        if (mconfig.debug_mode) {
             log_frame_transmission(frame);
         }
 
@@ -2718,7 +2718,7 @@ private:
         }
 
         // Optional: Trigger error recovery mechanism
-        if (m_config.debug_mode) {
+        if (mconfig.debug_mode) {
             log_error_statistics();
         }
     }
