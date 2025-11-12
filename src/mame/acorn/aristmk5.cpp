@@ -2752,8 +2752,8 @@ public:
 
     // Diagnostic Method for Protocol Health
     bool is_protocol_healthy() const {
-        return (m_error_stats.crc_errors < m_config.max_crc_errors &&
-                m_error_stats.transmission_errors < m_config.max_transmission_errors);
+        return (m_error_stats.crc_errors < mconfig.max_crc_errors &&
+                m_error_stats.transmission_errors < mconfig.max_transmission_errors);
     }
 };
 
