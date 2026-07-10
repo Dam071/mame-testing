@@ -218,6 +218,7 @@ void konendev_state::ymz280b_map(address_map &map)
 	map(0x600000, 0x7fffff).r("sndflash4.u5", FUNC(fujitsu_29f016a_device::read));
 }
 
+
 /*******************************************************************************
 
 Button layouts
@@ -271,6 +272,164 @@ Play 30 Lines: 2/4/6 (2:1 odds), black
 
 *******************************************************************************/
 
+
+#include "emu.h"
+
+#include "k057714.h"
+
+#include "cpu/h8/h83006.h"
+#include "cpu/powerpc/ppc.h"
+#include "machine/eepromser.h"
+#include "machine/intelfsh.h"
+#include "machine/mb8421.h"
+#include "machine/msm6242.h"
+#include "machine/nvram.h"
+#include "sound/ymz280b.h"
+
+#include "emupal.h"
+#include "screen.h"
+#include "speaker.h"
+
+
+namespace {
+
+class konendev_state : public driver_device
+{
+public:
+	konendev_state(const machine_config &mconfig, device_type type, const char *tag)
+		: driver_device(mconfig, type, tag)
+		, m_maincpu(*this, "maincpu")
+		, m_ifu(*this, "ifu")
+		, m_gcu(*this, "gcu")
+		, m_eeprom(*this, "eeprom")
+		, m_dsw(*this, "DSW")
+	{ }
+
+	void konendev(machine_config &config) ATTR_COLD;
+
+private:
+	// devices
+	required_device<cpu_device> m_maincpu;
+	required_device<h83007_device> m_ifu;
+	required_device<k057714_device> m_gcu;
+	required_device<eeprom_serial_93cxx_device> m_eeprom;
+	required_ioport m_dsw;
+
+	uint32_t mcu2_r(offs_t offset, uint32_t mem_mask = ~0);
+	uint32_t ifu2_r(offs_t offset, uint32_t mem_mask = ~0);
+	void eeprom_w(offs_t offset, uint32_t data, uint32_t mem_mask = ~0);
+
+	uint16_t ifu_unk_r();
+
+	void gcu_interrupt(int state);
+
+	void main_map(address_map &map) ATTR_COLD;
+	void ifu_map(address_map &map) ATTR_COLD;
+	void ymz280b_map(address_map &map) ATTR_COLD;
+};
+
+
+uint32_t konendev_state::mcu2_r(offs_t offset, uint32_t mem_mask)
+{
+	uint32_t r = 0;
+
+	if (ACCESSING_BITS_24_31)
+	{
+		r |= 0x11000000;        // MCU2 version
+	}
+	if (ACCESSING_BITS_16_23)
+	{
+		r |= (m_eeprom->do_read() ? 0x2 : 0) << 16;
+	}
+	if (ACCESSING_BITS_8_15)
+	{
+		r &= ~0x4000;       // MCU2 presence
+		r &= ~0x2000;       // IFU2 presence
+		r &= ~0x1000;       // FMU2 presence
+	}
+	if (ACCESSING_BITS_0_7)
+	{
+		r |= m_dsw->read() & 0xff;
+		r |= 0x04;          // battery 1 status
+		r |= 0x10;          // battery 2 status
+	}
+
+	return r;
+}
+
+uint32_t konendev_state::ifu2_r(offs_t offset, uint32_t mem_mask)
+{
+	uint32_t r = 0;
+
+	if (ACCESSING_BITS_0_7)
+	{
+		r |= 0x11;          // IFU2 version
+	}
+
+	return r;
+}
+
+void konendev_state::eeprom_w(offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	if (ACCESSING_BITS_0_7)
+	{
+		m_eeprom->di_write((data & 0x04) ? 1 : 0);
+		m_eeprom->clk_write((data & 0x02) ? ASSERT_LINE : CLEAR_LINE);
+		m_eeprom->cs_write((data & 0x01) ? ASSERT_LINE : CLEAR_LINE);
+	}
+}
+
+void konendev_state::main_map(address_map &map)
+{
+	map(0x00000000, 0x00ffffff).ram();
+	map(0x78000000, 0x78000003).r(FUNC(konendev_state::mcu2_r));
+	map(0x78080000, 0x7808000f).rw("rtc", FUNC(rtc62423_device::read), FUNC(rtc62423_device::write));
+	map(0x780c0000, 0x780c0001).rw("ymz", FUNC(ymz280b_device::read), FUNC(ymz280b_device::write));
+	map(0x78100000, 0x78100003).w(FUNC(konendev_state::eeprom_w));
+	map(0x78800000, 0x78800003).r(FUNC(konendev_state::ifu2_r));
+	map(0x78800004, 0x78800007).portr("IN1"); // doors, switches
+	map(0x78a00000, 0x78a00003).portr("IN2"); // hard meter access, hopper
+	map(0x78a00004, 0x78a00007).portr("IN3"); // main door optic
+	map(0x78c00000, 0x78c003ff).rw("dpram", FUNC(cy7c131_device::right_r), FUNC(cy7c131_device::right_w));
+	map(0x78e00000, 0x78e00003).portr("IN0"); // buttons
+	map(0x79000000, 0x79000003).w(m_gcu, FUNC(k057714_device::fifo_w));
+	map(0x79800000, 0x798000ff).rw(m_gcu, FUNC(k057714_device::read), FUNC(k057714_device::write));
+	map(0x7a000000, 0x7a01ffff).ram().share("nvram0");
+	map(0x7a100000, 0x7a11ffff).ram().share("nvram1");
+	map(0x7e800000, 0x7effffff).rw("prgflash1", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0x000000ff);
+	map(0x7e800000, 0x7effffff).rw("prgflash2", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0x0000ff00);
+	map(0x7e800000, 0x7effffff).rw("prgflash3", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0x00ff0000);
+	map(0x7e800000, 0x7effffff).rw("prgflash4", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0xff000000);
+	map(0x7f000000, 0x7f7fffff).rw("prgflash5", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0x000000ff);
+	map(0x7f000000, 0x7f7fffff).rw("prgflash6", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0x0000ff00);
+	map(0x7f000000, 0x7f7fffff).rw("prgflash7", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0x00ff0000);
+	map(0x7f000000, 0x7f7fffff).rw("prgflash8", FUNC(fujitsu_29f016a_device::read), FUNC(fujitsu_29f016a_device::write)).umask32(0xff000000);
+	map(0x7ff00000, 0x7fffffff).rom().region("program", 0);
+}
+
+uint16_t konendev_state::ifu_unk_r()
+{
+	return 0xc3c3;  // H8 program crashes immediately if it doesn't see
+}
+
+void konendev_state::ifu_map(address_map &map)
+{
+	map(0x000000, 0x07ffff).rom().region("ifu", 0);
+	map(0x200000, 0x20ffff).ram();
+	map(0x210000, 0x217fff).ram();
+	map(0x800000, 0x8003ff).rw("dpram", FUNC(cy7c131_device::left_r), FUNC(cy7c131_device::left_w));
+	map(0xa40000, 0xa40001).nopw();
+	map(0xfee010, 0xfee011).r(FUNC(konendev_state::ifu_unk_r));
+};
+
+void konendev_state::ymz280b_map(address_map &map)
+{
+	map(0x000000, 0x1fffff).r("sndflash1.u8", FUNC(fujitsu_29f016a_device::read));
+	map(0x200000, 0x3fffff).r("sndflash2.u7", FUNC(fujitsu_29f016a_device::read));
+	map(0x400000, 0x5fffff).r("sndflash3.u6", FUNC(fujitsu_29f016a_device::read));
+	map(0x600000, 0x7fffff).r("sndflash4.u5", FUNC(fujitsu_29f016a_device::read));
+}
+
 static INPUT_PORTS_START( konendev )
 	PORT_START("IN0")
 	PORT_BIT( 0x000000ff, IP_ACTIVE_LOW, IPT_UNUSED )
@@ -312,7 +471,11 @@ static INPUT_PORTS_START( konendev )
 	PORT_DIPNAME( 0x04000000, 0x00000000, "Cashbox Door" )
 	PORT_DIPSETTING( 0x04000000, DEF_STR( Off ) )
 	PORT_DIPSETTING( 0x00000000, DEF_STR( On ) )
-	PORT_BIT( 0x08000000, IP_ACTIVE_LOW, IPT_DOOR ) PORT_CODE(KEYCODE_M) PORT_TOGGLE PORT_NAME("Main Door")
+	// Old: PORT_BIT( 0x08000000, IP_ACTIVE_LOW, IPT_DOOR ) PORT_CODE(KEYCODE_M) PORT_TOGGLE PORT_NAME("Main Door")
+	// New DIP Switch Definition for Main Door
+	PORT_DIPNAME( 0x08000000, 0x00000000, "Main Door Switch" ) // Use a clear name here
+	PORT_DIPSETTING( 0x08000000, DEF_STR( Off ) )          // Set the default state (Off)
+	PORT_DIPSETTING( 0x00000000, DEF_STR( On ) )           // Set a potential alternative default/on state if needed
 	PORT_BIT( 0x10000000, IP_ACTIVE_LOW, IPT_GAMBLE_KEYIN ) PORT_CODE(KEYCODE_F1) PORT_NAME("Reset Key")
 	PORT_BIT( 0x20000000, IP_ACTIVE_LOW, IPT_GAMBLE_KEYIN ) PORT_CODE(KEYCODE_F2) PORT_TOGGLE PORT_NAME("Audit Key")
 	PORT_BIT( 0xc0000000, IP_ACTIVE_LOW, IPT_UNUSED )
@@ -334,7 +497,11 @@ static INPUT_PORTS_START( konendev )
 
 	PORT_START("IN3")
 	PORT_BIT( 0x00ffffff, IP_ACTIVE_LOW, IPT_UNUSED )
-	PORT_BIT( 0x01000000, IP_ACTIVE_HIGH, IPT_DOOR ) PORT_CODE(KEYCODE_M) PORT_TOGGLE PORT_NAME("Main Door Optic")
+	// Old: PORT_BIT( 0x01000000, IP_ACTIVE_HIGH, IPT_DOOR ) PORT_CODE(KEYCODE_M) PORT_TOGGLE PORT_NAME("Main Door Optic")
+	// New DIP Switch Definition for Main Door Optic
+	PORT_DIPNAME( 0x01000000, 0x00000000, "Main Door Optic" ) // Use a clear name here
+	PORT_DIPSETTING( 0x00000000, DEF_STR( Off ) )          // Set the default state (Off)
+	PORT_DIPSETTING( 0x01000000, DEF_STR( On ) )           // Set a potential alternative default/on state if needed
 	PORT_BIT( 0xfe000000, IP_ACTIVE_LOW, IPT_UNUSED )
 
 	PORT_START("DSW")
@@ -344,6 +511,7 @@ static INPUT_PORTS_START( konendev )
 	PORT_DIPNAME( 0x80, 0x80, "RAM Clear" )
 	PORT_DIPSETTING( 0x80, DEF_STR( Off ) )
 	PORT_DIPSETTING( 0x00, DEF_STR( On ) )
+
 INPUT_PORTS_END
 
 
@@ -934,3 +1102,4 @@ GAME( 200?, whiterus, konendev, konendev, konendev, konendev_state, empty_init, 
 
 // clear chip (not a game)
 GAME( 200?, konzero,  0,        konendev, konendev, konendev_state, empty_init, ROT0, "Konami", "Zero (Konami Endeavour)",                                         MACHINE_NOT_WORKING )
+
